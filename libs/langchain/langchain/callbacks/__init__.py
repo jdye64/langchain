@@ -42,6 +42,7 @@ from langchain.callbacks.tracers.langchain import LangChainTracer
 from langchain.callbacks.trubrics_callback import TrubricsCallbackHandler
 from langchain.callbacks.wandb_callback import WandbCallbackHandler
 from langchain.callbacks.whylabs_callback import WhyLabsCallbackHandler
+from langchain.callbacks.nemollm_callback import NeMoLLMCallbackHandler
 
 __all__ = [
     "AimCallbackHandler",
@@ -76,4 +77,5 @@ __all__ = [
     "SageMakerCallbackHandler",
     "LabelStudioCallbackHandler",
     "TrubricsCallbackHandler",
+    "NeMoLLMCallbackHandler",
 ]

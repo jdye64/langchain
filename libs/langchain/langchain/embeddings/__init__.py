@@ -52,6 +52,7 @@ from langchain.embeddings.mlflow_gateway import MlflowAIGatewayEmbeddings
 from langchain.embeddings.modelscope_hub import ModelScopeEmbeddings
 from langchain.embeddings.mosaicml import MosaicMLInstructorEmbeddings
 from langchain.embeddings.nlpcloud import NLPCloudEmbeddings
+from langchain.embeddings.nemollm import NeMoLLMEmbeddings
 from langchain.embeddings.octoai_embeddings import OctoAIEmbeddings
 from langchain.embeddings.ollama import OllamaEmbeddings
 from langchain.embeddings.open_clip import OpenCLIPEmbeddings
@@ -121,6 +122,7 @@ __all__ = [
     "JohnSnowLabsEmbeddings",
     "VoyageEmbeddings",
     "OpenCLIPEmbeddings",
+    "NeMoLLMEmbeddings",
 ]
 
 

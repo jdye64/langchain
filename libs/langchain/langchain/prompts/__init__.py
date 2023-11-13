@@ -51,6 +51,7 @@ from langchain.prompts.few_shot_with_templates import FewShotPromptWithTemplates
 from langchain.prompts.loading import load_prompt
 from langchain.prompts.pipeline import PipelinePromptTemplate
 from langchain.prompts.prompt import Prompt, PromptTemplate
+from langchain.prompts.nemollm import NeMoFewShotPromptTemplate
 from langchain.schema.prompt_template import BasePromptTemplate
 
 __all__ = [
@@ -74,4 +75,5 @@ __all__ = [
     "SystemMessagePromptTemplate",
     "load_prompt",
     "FewShotChatMessagePromptTemplate",
+    "NeMoFewShotPromptTemplate",
 ]
