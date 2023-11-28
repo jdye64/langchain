@@ -28,6 +28,7 @@ from langchain.retrievers.cohere_rag_retriever import CohereRagRetriever
 from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
 from langchain.retrievers.docarray import DocArrayRetriever
 from langchain.retrievers.elastic_search_bm25 import ElasticSearchBM25Retriever
+from langchain.retrievers.embedchain import EmbedchainRetriever
 from langchain.retrievers.ensemble import EnsembleRetriever
 from langchain.retrievers.google_cloud_documentai_warehouse import (
     GoogleDocumentAIWarehouseRetriever,
@@ -50,6 +51,7 @@ from langchain.retrievers.milvus import MilvusRetriever
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from langchain.retrievers.nemollm import NemoInformRetriever
+from langchain.retrievers.outline import OutlineRetriever
 from langchain.retrievers.parent_document_retriever import ParentDocumentRetriever
 from langchain.retrievers.pinecone_hybrid_search import PineconeHybridSearchRetriever
 from langchain.retrievers.pubmed import PubMedRetriever
@@ -79,6 +81,7 @@ __all__ = [
     "ChaindeskRetriever",
     "CohereRagRetriever",
     "ElasticSearchBM25Retriever",
+    "EmbedchainRetriever",
     "GoogleDocumentAIWarehouseRetriever",
     "GoogleCloudEnterpriseSearchRetriever",
     "GoogleVertexAIMultiTurnSearchRetriever",
@@ -91,6 +94,7 @@ __all__ = [
     "MetalRetriever",
     "MilvusRetriever",
     "MultiQueryRetriever",
+    "OutlineRetriever",
     "PineconeHybridSearchRetriever",
     "PubMedRetriever",
     "RemoteLangChainRetriever",
