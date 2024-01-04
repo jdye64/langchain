@@ -15,7 +15,7 @@ from langchain_core.language_models import BaseLLM
 from langchain_core.outputs import Generation, GenerationChunk, LLMResult
 from langchain_core.pydantic_v1 import Field, root_validator
 from tritonclient.grpc.service_pb2 import ModelInferResponse
-from tritonclient.utils import np_to_triton_dtype
+from tritonclient.utils import np_to_triton_dtype, triton_to_np_dtype
 
 
 class TritonTensorRTError(Exception):
@@ -32,14 +32,9 @@ class TritonTensorRTLLM(BaseLLM):
     Arguments:
         server_url: (str) The URL of the Triton inference server to use.
         model_name: (str) The name of the Triton TRT model to use.
-        temperature: (str) Temperature to use for sampling
-        top_p: (float) The top-p value to use for sampling
-        top_k: (float) The top k values use for sampling
-        beam_width: (int) Last n number of tokens to penalize
-        repetition_penalty: (int) Last n number of tokens to penalize
-        length_penalty: (float) The penalty to apply repeated tokens
-        tokens: (int) The maximum number of tokens to generate.
-        client: The client object used to communicate with the inference server
+        stop: (List[str]): Tokens to stop on when encountered.
+        seed: (int) The seed to use for random generation.
+        load_model: (bool) True if the Triton Server should be instructed to load the model into memory.
 
     Example:
         .. code-block:: python
@@ -55,24 +50,41 @@ class TritonTensorRTLLM(BaseLLM):
     model_name: str = Field(
         ..., description="The name of the model to use, such as 'ensemble'."
     )
-    ## Optional args for the model
-    temperature: float = 1.0
-    top_p: float = 0
-    top_k: int = 1
-    tokens: int = 100
-    beam_width: int = 1
-    repetition_penalty: float = 1.0
-    length_penalty: float = 1.0
     client: grpcclient.InferenceServerClient
+    model_metadata: Any
     stop: List[str] = Field(
         default_factory=lambda: ["</s>"], description="Stop tokens."
     )
-    seed: int = Field(42, description="The seed to use for random generation.")
+    random_seed: int = Field(42, description="The seed to use for random generation.")
     load_model: bool = Field(
         True,
         description="Request the inference server to load the specified model.\
             Certain Triton configurations do not allow for this operation.",
     )
+    stream_output: bool = Field(
+        True,
+        alias="stream",
+        description="True if results should be streamed from the Triton server"
+    )
+
+    ## Optional args that are generally present as input params for majority of models.
+    temperature: float = 1.0
+    top_p: float = 0
+    top_k: int = 1
+    max_tokens: int = 100
+    beam_width: int = 1
+    repetition_penalty: float = 1.0
+    length_penalty: float = 1.0
+    presence_penalty: float = 1.0
+
+    PARAMS_TO_IGNORE = [
+        'text_input'
+    ]
+
+    MUTUALLY_EXCLUSIVE_DICT = {
+        'repetition_penalty': 'presence_penalty',
+        'presence_penalty': 'repetition_penalty'
+    }
 
     def __del__(self):
         """Ensure the client streaming connection is properly shutdown"""
@@ -81,8 +93,39 @@ class TritonTensorRTLLM(BaseLLM):
     @root_validator(pre=True, allow_reuse=True)
     def validate_environment(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         """Validate that python package exists in environment."""
+        print(f"cls: {cls}")
+        print(f"Values: {values}")
         if not values.get("client"):
             values["client"] = grpcclient.InferenceServerClient(values["server_url"])
+
+            # A Triton Server is capable of serving up numerous different types of models. Obtain
+            # the list of input parameters required for the configured model.
+            model_metadata = values["client"].get_model_metadata(values["model_name"], as_json=True)
+            values["model_metadata"] = model_metadata
+            MANDATORY_PARAMS = []
+            for input in model_metadata['inputs']:
+                MANDATORY_PARAMS.append(input['name'])
+
+            """Validate that all mandatory parameters are present."""
+            missing_params = [param for param in MANDATORY_PARAMS if param not in values]
+
+            # Missing Params could possibly by Pydantic Fields with default values. IF they are we should
+            # use those values and remove that param from the missing_params list
+            missing_params = [param for param in missing_params if param not in TritonTensorRTLLM.__fields__]
+
+            # Also check the ModelField 'alias' to see if the input param is present as an alias
+            aliases = [model_field.alias for _, model_field in TritonTensorRTLLM.__fields__.items()]
+
+            missing_params = [param for param in missing_params if param not in aliases]
+
+            # Remove params that should be ignored
+            # missing_params.remove(values['PARAMS_TO_IGNORE'])
+            missing_params = [i for i in missing_params if i not in values['PARAMS_TO_IGNORE']]
+
+            print(f"Missing Params: {missing_params}, PARAMS_TO_IGNORE: {values['PARAMS_TO_IGNORE']}")
+            if missing_params:
+                raise TritonTensorRTRuntimeError(f"Missing mandatory parameters: {missing_params}")
+
         return values
 
     @property
@@ -92,15 +135,23 @@ class TritonTensorRTLLM(BaseLLM):
 
     @property
     def _model_default_parameters(self) -> Dict[str, Any]:
-        return {
-            "tokens": self.tokens,
-            "top_k": self.top_k,
-            "top_p": self.top_p,
-            "temperature": self.temperature,
-            "repetition_penalty": self.repetition_penalty,
-            "length_penalty": self.length_penalty,
-            "beam_width": self.beam_width,
-        }
+        default_params = {}
+
+        for input in self.model_metadata['inputs']:
+            try:
+                x = getattr(self, input['name'])
+                dt = triton_to_np_dtype(input['datatype'])
+                x = np.array([x]).astype(dt).reshape((1, -1))
+            except AttributeError:
+                print(f"Attribute: {input['name']} does not exist in TritonTensorRTLLM")
+                if input['name'] == "text_input":
+                    x = ""
+                if input['name'] == "min_length":
+                    x = np.array([1]).astype(np.uint32).reshape((1, -1))
+            default_params[input['name']] = x
+
+        print(f"Default Params: {default_params}")
+        return default_params
 
     @property
     def _identifying_params(self) -> Dict[str, Any]:
@@ -113,11 +164,6 @@ class TritonTensorRTLLM(BaseLLM):
 
     def _get_invocation_params(self, **kwargs: Any) -> Dict[str, Any]:
         return {**self._model_default_parameters, **kwargs}
-
-    def get_model_list(self) -> List[str]:
-        """Get a list of models loaded in the triton server."""
-        res = self.client.get_model_repository_index(as_json=True)
-        return [model["name"] for model in res["models"]]
 
     def _load_model(self, model_name: str, timeout: int = 1000) -> None:
         """Load a model into the server."""
@@ -147,6 +193,8 @@ class TritonTensorRTLLM(BaseLLM):
         invocation_params = self._get_invocation_params(**kwargs)
         stop_words = stop if stop is not None else self.stop
         generations = []
+        print(f"Invocation Params: {invocation_params}")
+        print(f"Prompts: {prompts}")
         # TODO: We should handle the native batching instead.
         for prompt in prompts:
             invoc_params = {**invocation_params, "prompt": [[prompt]]}
@@ -167,10 +215,12 @@ class TritonTensorRTLLM(BaseLLM):
     ) -> Iterator[GenerationChunk]:
         self._load_model(self.model_name)
 
+        print(f"Stream")
+
         invocation_params = self._get_invocation_params(**kwargs, prompt=[[prompt]])
         stop_words = stop if stop is not None else self.stop
 
-        inputs = self._generate_inputs(stream=True, **invocation_params)
+        inputs = self._generate_inputs(**invocation_params)
         outputs = self._generate_outputs()
 
         result_queue = self._invoke_triton(self.model_name, inputs, outputs, stop_words)
@@ -193,14 +243,17 @@ class TritonTensorRTLLM(BaseLLM):
     ) -> str:
         """Request inferencing from the triton server."""
         # create model inputs and outputs
-        inputs = self._generate_inputs(stream=False, prompt=prompt, **params)
+        inputs = self._generate_inputs(prompt=prompt, **params)
         outputs = self._generate_outputs()
 
         result_queue = self._invoke_triton(self.model_name, inputs, outputs, stop)
 
         result_str = ""
         for token in result_queue:
-            result_str += token
+            if isinstance(token, str):
+                result_str += token
+            else:
+                print(f"Exception!: {token}")
 
         self.client.stop_stream()
 
@@ -259,41 +312,52 @@ class TritonTensorRTLLM(BaseLLM):
     def _generate_inputs(
         self,
         prompt: Sequence[Sequence[str]],
-        tokens: int = 300,
-        temperature: float = 1.0,
-        top_k: float = 1,
-        top_p: float = 0,
-        beam_width: int = 1,
-        repetition_penalty: float = 1,
-        length_penalty: float = 1.0,
-        stream: bool = True,
+        **kwargs,
     ) -> List[grpcclient.InferRequestedOutput]:
         """Create the input for the triton inference server."""
-        query = np.array(prompt).astype(object)
-        request_output_len = np.array([tokens]).astype(np.uint32).reshape((1, -1))
-        runtime_top_k = np.array([top_k]).astype(np.uint32).reshape((1, -1))
-        runtime_top_p = np.array([top_p]).astype(np.float32).reshape((1, -1))
-        temperature_array = np.array([temperature]).astype(np.float32).reshape((1, -1))
-        len_penalty = np.array([length_penalty]).astype(np.float32).reshape((1, -1))
-        repetition_penalty_array = (
-            np.array([repetition_penalty]).astype(np.float32).reshape((1, -1))
-        )
-        random_seed = np.array([self.seed]).astype(np.uint64).reshape((1, -1))
-        beam_width_array = np.array([beam_width]).astype(np.uint32).reshape((1, -1))
-        streaming_data = np.array([[stream]], dtype=bool)
+        print(f"Kwargs: {kwargs}")
+        inputs = []
+        for input in self.model_metadata['inputs']:
+            print(f"Input: {input}")
+            try:
+                x = getattr(self, input['name'])
+                dt = triton_to_np_dtype(input['datatype'])
+                x = np.array([x]).astype(dt).reshape((1, -1))
+            except AttributeError:
+                print(f"Attribute: {input['name']} does not exist in TritonTensorRTLLM")
+                if input['name'] == "text_input":
+                    x = np.array(prompt).astype(object)
+                if input['name'] == "min_length":
+                    x = np.array([1]).astype(np.uint32).reshape((1, -1))
+            print(f"X: {x}")
+            inputs.append(self._prepare_tensor(input['name'], x))
 
-        inputs = [
-            self._prepare_tensor("text_input", query),
-            self._prepare_tensor("max_tokens", request_output_len),
-            self._prepare_tensor("top_k", runtime_top_k),
-            self._prepare_tensor("top_p", runtime_top_p),
-            self._prepare_tensor("temperature", temperature_array),
-            self._prepare_tensor("length_penalty", len_penalty),
-            self._prepare_tensor("repetition_penalty", repetition_penalty_array),
-            self._prepare_tensor("random_seed", random_seed),
-            self._prepare_tensor("beam_width", beam_width_array),
-            self._prepare_tensor("stream", streaming_data),
-        ]
+        # query = np.array(prompt).astype(object)
+        # request_output_len = np.array([tokens]).astype(np.uint32).reshape((1, -1))
+        # runtime_top_k = np.array([top_k]).astype(np.uint32).reshape((1, -1))
+        # runtime_top_p = np.array([top_p]).astype(np.float32).reshape((1, -1))
+        # temperature_array = np.array([temperature]).astype(np.float32).reshape((1, -1))
+        # len_penalty = np.array([length_penalty]).astype(np.float32).reshape((1, -1))
+        # repetition_penalty_array = (
+        #     np.array([repetition_penalty]).astype(np.float32).reshape((1, -1))
+        # )
+        # random_seed = np.array([self.seed]).astype(np.uint64).reshape((1, -1))
+        # beam_width_array = np.array([beam_width]).astype(np.uint32).reshape((1, -1))
+        # streaming_data = np.array([[stream]], dtype=bool)
+
+        # inputs = [
+        #     self._prepare_tensor("text_input", query),
+        #     self._prepare_tensor("max_tokens", request_output_len),
+        #     self._prepare_tensor("top_k", runtime_top_k),
+        #     self._prepare_tensor("top_p", runtime_top_p),
+        #     self._prepare_tensor("temperature", temperature_array),
+        #     self._prepare_tensor("length_penalty", len_penalty),
+        #     self._prepare_tensor("repetition_penalty", repetition_penalty_array),
+        #     self._prepare_tensor("random_seed", random_seed),
+        #     self._prepare_tensor("beam_width", beam_width_array),
+        #     self._prepare_tensor("stream", streaming_data),
+        # ]
+        print(f"Inputs: {inputs}")
         return inputs
 
     def _send_stop_signals(self, model_name: str, request_id: str) -> None:
